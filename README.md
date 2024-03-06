@@ -66,3 +66,11 @@ This code snippet is written in Python and uses several libraries (`cv2`, `panda
     - The video capture is released and all OpenCV windows are destroyed.
 
 This script is essentially for a traffic monitoring application, where it counts the number of cars, buses, and trucks passing a certain line in the video. It demonstrates the use of computer vision and machine learning for real-world applications such as traffic analysis and vehicle tracking.
+
+
+
+
+
+
+
+<img width="960" alt="image" src="https://github.com/Subhadip7/yolov8-multiple-vehicle-detection/assets/95004440/6e767950-5c7b-4118-9831-f673db91ad7c">
