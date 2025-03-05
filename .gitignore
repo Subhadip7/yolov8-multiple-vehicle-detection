@@ -1,5 +1,8 @@
 yolov8m.pt
 yolov8x.pt
+yolov8x.onnx
+yolov8_to_onnx_end2end.sh
 out
 out_img
 videos
+.idea
