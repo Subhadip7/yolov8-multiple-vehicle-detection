@@ -2,112 +2,185 @@ import cv2
 import pandas as pd
 from ultralytics import YOLO
 import cvzone
-from tracker import*  # Ensure the Tracker class is defined correctly in tracker.py
+from tracker import Tracker
 
-# Load the YOLO model
-model = YOLO('yolov8s.pt')
+# ------------------------------
+# Configuration
+# ------------------------------
+CAPACITY_TONS = 20.0
+VEHICLE_WEIGHTS_TONS = {
+    'car': 1.5,
+    'bus': 12.0,
+    'truck': 15.0,
+}
 
-# Function to print the mouse position in RGB window
+# Entry and exit lines (Y coordinates)
+ENTRY_LINE_Y = 184
+EXIT_LINE_Y = 209
+LINE_TOLERANCE = 8
+
+# ------------------------------
+# Optional: Mouse position debug
+# ------------------------------
 def RGB(event, x, y, flags, param):
     if event == cv2.EVENT_MOUSEMOVE:
         point = [x, y]
-        print(point)
+        # print(point)  # Uncomment for debugging
 
-# Create a named window and set a mouse callback function
+
+# ------------------------------
+# Setup
+# ------------------------------
+model = YOLO('yolov8s.pt')
+cap = cv2.VideoCapture('tf.mp4')
+
+with open("coco.txt", "r") as my_file:
+    class_list = my_file.read().split("\n")
+
 cv2.namedWindow('RGB')
 cv2.setMouseCallback('RGB', RGB)
-cap = cv2.VideoCapture('tf.mp4')  # Initialize video capture with the video file
 
-# Open the 'coco.txt' file containing class names and read its content
-with open("coco.txt", "r") as my_file:
-    class_list = my_file.read().split("\n")  # Split the content by newline to get a list of class names
+# Use separate trackers per class for stable IDs
+car_tracker = Tracker()
+bus_tracker = Tracker()
+truck_tracker = Tracker()
 
-# Initialize counters and trackers
-count = 0
-car_count = 0
-bus_count = 0
-truck_count = 0
-tracker = Tracker()
-cy1 = 184
-cy2 = 209
-offset = 8
+# Runtime state
+on_bridge_ids = set()  # set of tuples like ('car', id)
+id_to_last_cy = {}     # map of ('car', id) -> last center y
+current_load_tons = 0.0
 
-# Start processing the video frame by frame
+# Diagnostics (optional)
+entries = {'car': 0, 'bus': 0, 'truck': 0}
+exits = {'car': 0, 'bus': 0, 'truck': 0}
+
+# Process frames
+frame_idx = 0
 while True:
-    ret, frame = cap.read()  # Read a frame from the video
-    if not ret:  # If no frame is read (end of video), break the loop
+    ret, frame = cap.read()
+    if not ret:
         break
-    count += 1  # Increment frame count
-    if count % 3 != 0:  # Process every third frame
-        continue
-    frame = cv2.resize(frame, (1020, 500))  # Resize the frame for consistent processing
 
-    # Predict objects in the frame using YOLO model
+    frame_idx += 1
+    # Process every 3rd frame to reduce load
+    if frame_idx % 3 != 0:
+        continue
+
+    frame = cv2.resize(frame, (1020, 500))
+
+    # Run detection
     results = model.predict(frame)
     detections = results[0].boxes.data
-    px = pd.DataFrame(detections).astype("float")  # Convert the prediction results into a pandas DataFrame
+    px = pd.DataFrame(detections).astype("float")
 
-    # Initialize a list to store bounding boxes for each vehicle type
+    # Collect detections by class
     cars, buses, trucks = [], [], []
-
-    # Iterate over the detection results and categorize them into cars, buses, or trucks
-    for index, row in px.iterrows():
+    for _, row in px.iterrows():
         x1 = int(row[0])
         y1 = int(row[1])
         x2 = int(row[2])
         y2 = int(row[3])
-        d = int(row[5])
-        c = class_list[d]
-        if 'car' in c:
+        cls_idx = int(row[5])
+        cls_name = class_list[cls_idx] if 0 <= cls_idx < len(class_list) else ''
+
+        if 'car' in cls_name:
             cars.append([x1, y1, x2, y2])
-        elif 'bus' in c:
+        elif 'bus' in cls_name:
             buses.append([x1, y1, x2, y2])
-        elif 'truck' in c:
+        elif 'truck' in cls_name:
             trucks.append([x1, y1, x2, y2])
 
-    # Update tracker for each vehicle type
-    cars_boxes = tracker.update(cars)
-    buses_boxes = tracker.update(buses)
-    trucks_boxes = tracker.update(trucks)
+    # Update trackers
+    car_boxes = car_tracker.update(cars)
+    bus_boxes = bus_tracker.update(buses)
+    truck_boxes = truck_tracker.update(trucks)
 
-    # Draw lines on the frame that the vehicles are supposed to cross
-    cv2.line(frame, (1, cy1), (1018, cy1), (0, 255, 0), 2)
-    cv2.line(frame, (3, cy2), (1016, cy2), (0, 0, 255), 2)
+    # Determine barrier state
+    barrier_closed = current_load_tons > CAPACITY_TONS
 
-    # Check each car, bus, and truck
-    for bbox in cars_boxes:
-        cx = int((bbox[0] + bbox[2]) / 2)
-        cy = int((bbox[1] + bbox[3]) / 2)
-        if (cy > cy1 - offset) and (cy < cy1 + offset):
-            car_count += 1
+    # Draw entry/exit lines (color reflects barrier state)
+    entry_color = (0, 0, 255) if barrier_closed else (0, 255, 0)
+    exit_color = (0, 0, 255)
+    cv2.line(frame, (1, ENTRY_LINE_Y), (1018, ENTRY_LINE_Y), entry_color, 2)
+    cv2.line(frame, (3, EXIT_LINE_Y), (1016, EXIT_LINE_Y), exit_color, 2)
 
-    for bbox in buses_boxes:
-        cx = int((bbox[0] + bbox[2]) / 2)
-        cy = int((bbox[1] + bbox[3]) / 2)
-        if (cy > cy1 - offset) and (cy < cy1 + offset):
-            bus_count += 1
+    # Helper to process a single detection list
+    def process_boxes(boxes, cls_name):
+        global current_load_tons
+        for bbox in boxes:
+            x1, y1, x2, y2, obj_id = bbox
+            cx = int((x1 + x2) / 2)
+            cy = int((y1 + y2) / 2)
 
-    for bbox in trucks_boxes:
-        cx = int((bbox[0] + bbox[2]) / 2)
-        cy = int((bbox[1] + bbox[3]) / 2)
-        if (cy > cy1 - offset) and (cy < cy1 + offset):
-            truck_count += 1
+            key = (cls_name, obj_id)
+            prev_cy = id_to_last_cy.get(key)
 
-    # Draw and annotate each vehicle
-    for bbox in cars_boxes + buses_boxes + trucks_boxes:
-        cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 0, 255), 2)
-        cvzone.putTextRect(frame, f'{bbox[4]}', (bbox[0], bbox[1]), 1, 1)
+            # Detect crossings using previous and current center Y positions
+            if prev_cy is not None:
+                crossed_entry = (prev_cy < ENTRY_LINE_Y - LINE_TOLERANCE) and (cy >= ENTRY_LINE_Y + LINE_TOLERANCE)
+                crossed_exit = (prev_cy < EXIT_LINE_Y - LINE_TOLERANCE) and (cy >= EXIT_LINE_Y + LINE_TOLERANCE)
 
-    # Display the frame in the 'RGB' window
+                # Handle entry
+                if crossed_entry and key not in on_bridge_ids:
+                    weight = VEHICLE_WEIGHTS_TONS.get(cls_name, 0.0)
+                    # Only allow entry if this vehicle would NOT exceed capacity
+                    if current_load_tons + weight <= CAPACITY_TONS:
+                        on_bridge_ids.add(key)
+                        current_load_tons += weight
+                        entries[cls_name] += 1
+                    # else: barrier is effectively closing; do not admit
+
+                # Handle exit
+                if crossed_exit and key in on_bridge_ids:
+                    weight = VEHICLE_WEIGHTS_TONS.get(cls_name, 0.0)
+                    if weight > 0:
+                        current_load_tons = max(0.0, current_load_tons - weight)
+                    on_bridge_ids.discard(key)
+                    exits[cls_name] += 1
+
+            # Update last seen Y
+            id_to_last_cy[key] = cy
+
+            # Draw bbox and ID label
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
+            cvzone.putTextRect(frame, f'{cls_name} #{obj_id}', (x1, max(0, y1 - 10)), 1, 1)
+            cv2.circle(frame, (cx, cy), 3, (0, 255, 255), -1)
+
+    # Process detections by class
+    process_boxes(car_boxes, 'car')
+    process_boxes(bus_boxes, 'bus')
+    process_boxes(truck_boxes, 'truck')
+
+    # Recompute barrier state after any changes
+    barrier_closed = current_load_tons > CAPACITY_TONS
+
+    # Overlay current load and barrier status
+    status_text = 'CLOSED' if barrier_closed else 'OPEN'
+    status_color = (0, 0, 255) if barrier_closed else (0, 200, 0)
+    cvzone.putTextRect(
+        frame,
+        f'Bridge: {status_text} | Load: {current_load_tons:.1f}/{CAPACITY_TONS:.1f} tons',
+        (10, 30),
+        1,
+        2,
+        colorR=status_color,
+        colorT=(255, 255, 255)
+    )
+
+    # Visual barrier at the entry line when closed
+    if barrier_closed:
+        cv2.rectangle(frame, (0, max(0, ENTRY_LINE_Y - 6)), (frame.shape[1], ENTRY_LINE_Y + 6), (0, 0, 255), -1)
+        cvzone.putTextRect(frame, 'NO ENTRY - OVER CAPACITY', (10, ENTRY_LINE_Y - 35), 1, 1, colorR=(0, 0, 255))
+
+    # Show frame
     cv2.imshow("RGB", frame)
-    if cv2.waitKey(1) & 0xFF == 27:  # Break the loop if 'Esc' key is pressed
+    if cv2.waitKey(1) & 0xFF == 27:
         break
 
-# Print the total count for each vehicle type
-print(f'Total car count: {car_count}')
-print(f'Total bus count: {bus_count}')
-print(f'Total truck count: {truck_count}')
+# Final stats
+print(f"Entries: cars={entries['car']}, buses={entries['bus']}, trucks={entries['truck']}")
+print(f"Exits:   cars={exits['car']}, buses={exits['bus']}, trucks={exits['truck']}")
+print(f'Final on-bridge count: {len(on_bridge_ids)} | Load: {current_load_tons:.1f} tons')
 
-# Release the video capture and destroy all OpenCV windows
 cap.release()
 cv2.destroyAllWindows()
