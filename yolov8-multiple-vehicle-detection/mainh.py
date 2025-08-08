@@ -18,6 +18,7 @@ VEHICLE_WEIGHTS_TONS = {
 ENTRY_LINE_Y = 184
 EXIT_LINE_Y = 209
 LINE_TOLERANCE = 8
+STALE_FRAMES_TO_EVICT = 120  # frames after last seen to evict lost IDs
 
 # ------------------------------
 # Optional: Mouse position debug
@@ -49,6 +50,9 @@ truck_tracker = Tracker()
 on_bridge_ids = set()  # set of tuples like ('car', id)
 id_to_last_cy = {}     # map of ('car', id) -> last center y
 current_load_tons = 0.0
+
+# Track last seen frame for each key to evict stale IDs
+id_to_last_seen_frame = {}
 
 # Diagnostics (optional)
 entries = {'car': 0, 'bus': 0, 'truck': 0}
@@ -96,7 +100,7 @@ while True:
     truck_boxes = truck_tracker.update(trucks)
 
     # Determine barrier state
-    barrier_closed = current_load_tons > CAPACITY_TONS
+    barrier_closed = current_load_tons >= CAPACITY_TONS
 
     # Draw entry/exit lines (color reflects barrier state)
     entry_color = (0, 0, 255) if barrier_closed else (0, 255, 0)
@@ -138,8 +142,9 @@ while True:
                     on_bridge_ids.discard(key)
                     exits[cls_name] += 1
 
-            # Update last seen Y
+            # Update last seen Y and last seen frame
             id_to_last_cy[key] = cy
+            id_to_last_seen_frame[key] = frame_idx
 
             # Draw bbox and ID label
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
@@ -151,8 +156,21 @@ while True:
     process_boxes(bus_boxes, 'bus')
     process_boxes(truck_boxes, 'truck')
 
+    # Evict stale IDs that have not been seen for a while
+    to_evict = []
+    for key in list(on_bridge_ids):
+        last_seen = id_to_last_seen_frame.get(key, 0)
+        if frame_idx - last_seen > STALE_FRAMES_TO_EVICT:
+            to_evict.append(key)
+    for key in to_evict:
+        cls_name, _ = key
+        weight = VEHICLE_WEIGHTS_TONS.get(cls_name, 0.0)
+        if weight > 0:
+            current_load_tons = max(0.0, current_load_tons - weight)
+        on_bridge_ids.discard(key)
+
     # Recompute barrier state after any changes
-    barrier_closed = current_load_tons > CAPACITY_TONS
+    barrier_closed = current_load_tons >= CAPACITY_TONS
 
     # Overlay current load and barrier status
     status_text = 'CLOSED' if barrier_closed else 'OPEN'
